@@ -1,16 +1,29 @@
 import { getSupabaseClient } from './supabaseClient';
 import type { CylinderConfig, WeightReading } from '../types/lpg';
+import { calculateRemainingGas } from '../utils/calculations';
 
 /**
- * Maps database row to application WeightReading model
+ * Maps database row to application WeightReading model.
+ * Gracefully handles Supabase numeric types, nulls, and timestamp formats.
  */
-function mapRowToReading(row: any): WeightReading {
+export function mapRowToReading(row: any, tareWeightKg?: number): WeightReading {
+  const totalWeight = typeof row.total_weight_kg === 'number'
+    ? row.total_weight_kg
+    : parseFloat(row.total_weight_kg || '0');
+
+  let remainingGas = 0;
+  if (row.remaining_gas_kg !== null && row.remaining_gas_kg !== undefined && !isNaN(Number(row.remaining_gas_kg))) {
+    remainingGas = parseFloat(row.remaining_gas_kg);
+  } else if (tareWeightKg !== undefined) {
+    remainingGas = calculateRemainingGas(totalWeight, tareWeightKg);
+  }
+
   return {
-    id: row.id,
-    timestamp: row.timestamp,
-    totalWeightKg: parseFloat(row.total_weight_kg),
-    remainingGasKg: parseFloat(row.remaining_gas_kg),
-    source: row.source === 'esp32' ? 'esp32' : 'manual',
+    id: String(row.id || `supa-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`),
+    timestamp: row.timestamp || row.created_at || new Date().toISOString(),
+    totalWeightKg: isNaN(totalWeight) ? 0 : parseFloat(totalWeight.toFixed(2)),
+    remainingGasKg: isNaN(remainingGas) ? 0 : parseFloat(remainingGas.toFixed(2)),
+    source: (row.source === 'esp32' || row.source === 'ESP32') ? 'esp32' : (row.source || 'esp32'),
     notes: row.notes || undefined,
   };
 }
@@ -18,7 +31,11 @@ function mapRowToReading(row: any): WeightReading {
 /**
  * Fetches all readings from Supabase sorted chronologically ascending
  */
-export async function fetchReadingsFromSupabase(): Promise<{ success: boolean; readings?: WeightReading[]; error?: string }> {
+export async function fetchReadingsFromSupabase(tareWeightKg?: number): Promise<{
+  success: boolean;
+  readings?: WeightReading[];
+  error?: string;
+}> {
   const client = getSupabaseClient();
   if (!client) {
     return { success: false, error: 'Supabase client not configured' };
@@ -34,11 +51,91 @@ export async function fetchReadingsFromSupabase(): Promise<{ success: boolean; r
       return { success: false, error: error.message };
     }
 
-    const readings = (data || []).map(mapRowToReading);
+    const readings = (data || []).map(r => mapRowToReading(r, tareWeightKg));
     return { success: true, readings };
   } catch (err: unknown) {
     const error = err as Error;
     return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Retrieves the latest scale reading from Supabase ordered by timestamp descending.
+ */
+export async function fetchLatestReadingFromSupabase(tareWeightKg?: number): Promise<{
+  success: boolean;
+  reading?: WeightReading;
+  totalCount?: number;
+  isEmpty?: boolean;
+  error?: string;
+}> {
+  const client = getSupabaseClient();
+  if (!client) {
+    return {
+      success: false,
+      error: 'Supabase client is not configured. Please enter your Supabase URL and Anon Key.',
+    };
+  }
+
+  try {
+    const { data, error, count } = await client
+      .from('lpg_readings')
+      .select('*', { count: 'exact' })
+      .order('timestamp', { ascending: false })
+      .limit(1);
+
+    if (error) {
+      return { success: false, error: error.message };
+    }
+
+    if (!data || data.length === 0) {
+      return { success: true, isEmpty: true, totalCount: 0 };
+    }
+
+    const latest = mapRowToReading(data[0], tareWeightKg);
+    return { success: true, reading: latest, totalCount: count || data.length };
+  } catch (err: unknown) {
+    const error = err as Error;
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Subscribes to Supabase Realtime changes on public.lpg_readings.
+ * Triggers callback immediately when the ESP32 inserts a new row!
+ */
+export function subscribeToSupabaseReadings(
+  onNewReading: (reading: WeightReading) => void,
+  tareWeightKg?: number
+): (() => void) | null {
+  const client = getSupabaseClient();
+  if (!client) return null;
+
+  try {
+    const channel = client
+      .channel('realtime_lpg_readings_channel')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'lpg_readings' },
+        (payload) => {
+          if (payload.new && typeof payload.new === 'object') {
+            const reading = mapRowToReading(payload.new, tareWeightKg);
+            onNewReading(reading);
+          }
+        }
+      )
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          console.log('[Supabase Realtime] Subscribed to public.lpg_readings updates.');
+        }
+      });
+
+    return () => {
+      client.removeChannel(channel);
+    };
+  } catch (err) {
+    console.error('Failed to setup Supabase Realtime subscription:', err);
+    return null;
   }
 }
 

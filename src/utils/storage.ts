@@ -17,9 +17,9 @@ export const DEFAULT_CYLINDER_CONFIG: CylinderConfig = {
 };
 
 export const DEFAULT_ESP32_CONFIG: ESP32Config = {
-  endpointUrl: import.meta.env.VITE_ESP32_API_URL || 'http://192.168.1.180/api/weight',
-  pollIntervalSeconds: Number(import.meta.env.VITE_ESP32_POLL_INTERVAL) || 30,
-  autoLogReadings: false,
+  endpointUrl: import.meta.env.VITE_ESP32_API_URL || '',
+  pollIntervalSeconds: Number(import.meta.env.VITE_ESP32_POLL_INTERVAL) || 10,
+  autoLogReadings: true,
 };
 
 export function getStoredReadings(): WeightReading[] {
@@ -69,7 +69,12 @@ export function getStoredESP32Config(): ESP32Config {
     const raw = localStorage.getItem(STORAGE_KEYS.ESP32_CONFIG);
     if (!raw) return DEFAULT_ESP32_CONFIG;
     const parsed = JSON.parse(raw);
-    return { ...DEFAULT_ESP32_CONFIG, ...parsed };
+    const config = { ...DEFAULT_ESP32_CONFIG, ...parsed };
+    // Clear obsolete local IP address
+    if (config.endpointUrl && config.endpointUrl.includes('192.168.1.180')) {
+      config.endpointUrl = '';
+    }
+    return config;
   } catch {
     return DEFAULT_ESP32_CONFIG;
   }

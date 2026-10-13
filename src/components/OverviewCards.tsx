@@ -7,12 +7,14 @@ interface OverviewCardsProps {
   forecast: ForecastResult;
   config: CylinderConfig;
   onOpenSettings: () => void;
+  readingTimestamp?: string | null;
 }
 
 export const OverviewCards: React.FC<OverviewCardsProps> = ({
   forecast,
   config,
   onOpenSettings,
+  readingTimestamp,
 }) => {
   const getStatusColor = (percent: number) => {
     if (percent <= config.criticalGasThresholdPercent) {
@@ -44,14 +46,30 @@ export const OverviewCards: React.FC<OverviewCardsProps> = ({
 
   const statusColors = getStatusColor(forecast.remainingPercent);
 
+  // Format reading timestamp if provided
+  const formattedTime = readingTimestamp
+    ? new Date(readingTimestamp).toLocaleTimeString('en-US', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      })
+    : null;
+
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
       {/* CARD 1: Current Scale Weight */}
       <div className="relative group bg-[#131822]/90 hover:bg-[#151c29] border border-slate-800/80 hover:border-slate-700/80 rounded-2xl p-4 sm:p-5 transition-all duration-300 shadow-lg shadow-black/20">
         <div className="flex items-center justify-between mb-3">
-          <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-            Total Scale Weight
-          </span>
+          <div>
+            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 block">
+              Total Scale Weight
+            </span>
+            {formattedTime && (
+              <span className="text-[10px] text-emerald-400 font-mono block mt-0.5" title={`Reading timestamp: ${readingTimestamp}`}>
+                Live: {formattedTime}
+              </span>
+            )}
+          </div>
           <div className="p-2 rounded-xl bg-slate-800/80 text-slate-300 border border-slate-700/50">
             <Scale className="w-4 h-4 text-slate-300" />
           </div>

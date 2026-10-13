@@ -17,6 +17,7 @@ import {
 import type { CylinderConfig, ESP32Config, SupabaseConfig } from '../types/lpg';
 import { ARDUINO_ESP32_FIRMWARE_SKETCH, fetchESP32Weight } from '../services/esp32Service';
 import { testSupabaseConnection } from '../services/supabaseClient';
+import { fetchLatestReadingFromSupabase } from '../services/supabaseService';
 import { SUPABASE_SQL_SCHEMA } from '../services/supabaseSchemaCode';
 
 interface SettingsModalProps {
@@ -131,19 +132,41 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setIsTestingPing(true);
     setPingResult(null);
 
-    const res = await fetchESP32Weight(endpointUrl.trim(), 4000);
+    // 1. If custom local REST endpoint is specified, test it
+    if (endpointUrl.trim()) {
+      const res = await fetchESP32Weight(endpointUrl.trim(), 4000);
+      if (res.success && res.weightKg !== undefined) {
+        setIsTestingPing(false);
+        setPingResult({
+          success: true,
+          weight: res.weightKg,
+          message: `Direct ESP32 endpoint reached! Returned weight reading: ${res.weightKg} kg`,
+        });
+        return;
+      }
+    }
+
+    // 2. Default & Recommended: Check Supabase public.lpg_readings table
+    const supaRes = await fetchLatestReadingFromSupabase(config.tareWeightKg);
     setIsTestingPing(false);
 
-    if (res.success && res.weightKg !== undefined) {
-      setPingResult({
-        success: true,
-        weight: res.weightKg,
-        message: `Connection successful! ESP32 returned weight reading: ${res.weightKg} kg`,
-      });
+    if (supaRes.success) {
+      if (supaRes.reading) {
+        setPingResult({
+          success: true,
+          weight: supaRes.reading.totalWeightKg,
+          message: `Supabase Cloud Connected! Latest reading from public.lpg_readings: ${supaRes.reading.totalWeightKg} kg (${new Date(supaRes.reading.timestamp).toLocaleString()})`,
+        });
+      } else {
+        setPingResult({
+          success: true,
+          message: 'Connected to Supabase public.lpg_readings table! Waiting for first ESP32 reading upload (table is currently empty).',
+        });
+      }
     } else {
       setPingResult({
         success: false,
-        message: res.errorMessage || 'Failed to connect to ESP32 device.',
+        message: supaRes.error || (endpointUrl.trim() ? 'Failed to connect to both direct endpoint and Supabase table.' : 'Failed to connect to Supabase. Check your URL and anon key in the Supabase tab.'),
       });
     }
   };
@@ -500,23 +523,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {activeTab === 'esp32' && (
             <div className="space-y-4 text-xs">
               <div className="p-3.5 rounded-xl bg-slate-900/80 border border-slate-800 text-slate-300 space-y-2">
-                <span className="font-semibold text-orange-400 block">ESP32 REST API Hardware Setup</span>
+                <span className="font-semibold text-orange-400 block">ESP32 Hardware & Cloud Integration</span>
                 <p className="text-[11px] text-slate-400 leading-relaxed">
-                  Connect an ESP32 microcontroller with an HX711 load cell amplifier beneath your cylinder scale. 
-                  The ESP32 runs a lightweight web server exposing a REST endpoint that returns JSON or plaintext weight.
+                  Your ESP32 uploads weight readings directly to the Supabase <code className="text-emerald-400 font-mono">public.lpg_readings</code> table (HTTP 201). 
+                  The dashboard queries Supabase and listens via Supabase Realtime. Direct local HTTP endpoint is optional.
                 </p>
               </div>
 
               <div>
                 <label className="block font-semibold text-slate-300 mb-1">
-                  ESP32 REST Endpoint URL
+                  ESP32 Direct Endpoint URL (Optional)
                 </label>
                 <div className="flex gap-2">
                   <input
                     type="url"
                     value={endpointUrl}
                     onChange={(e) => setEndpointUrl(e.target.value)}
-                    placeholder="http://192.168.1.180/api/weight"
+                    placeholder="Leave blank to use Supabase public.lpg_readings (Recommended)"
                     className="flex-1 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-white font-mono text-xs focus:outline-none focus:border-orange-500"
                   />
                   <button
@@ -530,7 +553,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </button>
                 </div>
                 <span className="text-[10px] text-slate-500 mt-1 block">
-                  Configurable via environment variable <code>VITE_ESP32_API_URL</code> or enter local IP above.
+                  Leave blank to pull directly from Supabase Cloud table (default & recommended).
                 </span>
               </div>
 

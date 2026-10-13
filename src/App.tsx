@@ -33,7 +33,6 @@ import {
   exportDataAsJSON,
   clearAllStoredData,
 } from './utils/storage';
-import { fetchESP32Weight } from './services/esp32Service';
 import {
   getStoredSupabaseConfig,
   saveStoredSupabaseConfig,
@@ -41,6 +40,8 @@ import {
 } from './services/supabaseClient';
 import {
   fetchReadingsFromSupabase,
+  fetchLatestReadingFromSupabase,
+  subscribeToSupabaseReadings,
   upsertReadingToSupabase,
   deleteReadingFromSupabase,
   batchSyncReadingsToSupabase,
@@ -126,65 +127,88 @@ export function App() {
     initCloudSync();
   }, [isCloudActive, supabaseConfig.autoSync]);
 
-  // ESP32 Live Polling Logic
+  // ESP32 Live Query Logic: fetches latest reading from Supabase public.lpg_readings
   const pollESP32 = useCallback(async () => {
     if (mode !== 'esp32') return;
 
     setEsp32Status(prev => ({ ...prev, isPolling: true }));
+    const nowTimeStr = new Date().toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
 
-    const res = await fetchESP32Weight(esp32Config.endpointUrl, 5000);
-    const nowTimeStr = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-
-    if (res.success && res.weightKg !== undefined) {
-      setEsp32Status({
-        isConnected: true,
-        isPolling: false,
-        lastChecked: nowTimeStr,
-        lastReading: res.weightKg,
-        errorMessage: null,
-        statusCode: res.statusCode,
-      });
-
-      if (esp32Config.autoLogReadings) {
-        const newReading: WeightReading = {
-          id: `esp32-${Date.now()}`,
-          timestamp: new Date().toISOString(),
-          totalWeightKg: res.weightKg,
-          remainingGasKg: calculateRemainingGas(res.weightKg, config.tareWeightKg),
-          source: 'esp32',
-          notes: 'Auto-polled from ESP32 scale',
-        };
-
-        setReadings(prev => {
-          const last = prev[prev.length - 1];
-          if (
-            last &&
-            last.source === 'esp32' &&
-            Math.abs(last.totalWeightKg - res.weightKg!) < 0.05 &&
-            new Date().getTime() - new Date(last.timestamp).getTime() < 60000
-          ) {
-            return prev;
-          }
-
-          if (isCloudActive) {
-            upsertReadingToSupabase(newReading).catch(console.error);
-          }
-
-          return [...prev, newReading];
-        });
-      }
-    } else {
+    if (!isCloudActive) {
       setEsp32Status({
         isConnected: false,
         isPolling: false,
         lastChecked: nowTimeStr,
         lastReading: null,
-        errorMessage: res.errorMessage || 'Failed to reach ESP32 endpoint.',
-        statusCode: res.statusCode,
+        readingTimestamp: null,
+        errorMessage: 'Supabase client is not configured. Please add your Supabase URL & Anon Key in Settings.',
+        statusCode: 400,
+      });
+      return;
+    }
+
+    // 1. Retrieve the latest reading using the timestamp column in descending order
+    const latestRes = await fetchLatestReadingFromSupabase(config.tareWeightKg);
+
+    if (!latestRes.success) {
+      setEsp32Status({
+        isConnected: false,
+        isPolling: false,
+        lastChecked: nowTimeStr,
+        lastReading: null,
+        readingTimestamp: null,
+        errorMessage: latestRes.error || 'Failed to fetch data from Supabase public.lpg_readings.',
+        statusCode: 500,
+      });
+      return;
+    }
+
+    if (latestRes.isEmpty || !latestRes.reading) {
+      setEsp32Status({
+        isConnected: false,
+        isPolling: false,
+        lastChecked: nowTimeStr,
+        lastReading: null,
+        readingTimestamp: null,
+        totalCloudReadings: 0,
+        errorMessage: 'Supabase table public.lpg_readings is currently empty. Waiting for ESP32 upload...',
+        statusCode: 200,
+      });
+      return;
+    }
+
+    const latest = latestRes.reading;
+    setEsp32Status({
+      isConnected: true,
+      isPolling: false,
+      lastChecked: nowTimeStr,
+      lastReading: latest.totalWeightKg,
+      readingTimestamp: latest.timestamp,
+      totalCloudReadings: latestRes.totalCount,
+      errorMessage: null,
+      statusCode: 200,
+    });
+
+    // 2. Refresh full reading list to update dashboard charts, forecasts, and tables
+    const allRes = await fetchReadingsFromSupabase(config.tareWeightKg);
+    if (allRes.success && allRes.readings && allRes.readings.length > 0) {
+      setReadings(allRes.readings);
+    } else {
+      setReadings(prev => {
+        const exists = prev.some(r => r.id === latest.id);
+        if (exists) return prev;
+        return [...prev, latest].sort(
+          (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+        );
       });
     }
-  }, [mode, esp32Config, config.tareWeightKg, isCloudActive]);
+  }, [mode, isCloudActive, config.tareWeightKg]);
 
+  // Periodic polling interval
   useEffect(() => {
     if (mode !== 'esp32') return;
 
@@ -196,6 +220,45 @@ export function App() {
 
     return () => clearInterval(interval);
   }, [mode, esp32Config.pollIntervalSeconds, pollESP32]);
+
+  // Supabase Realtime Subscription: listens to live INSERTs from ESP32 on public.lpg_readings
+  useEffect(() => {
+    if (!isCloudActive) return;
+
+    const unsubscribe = subscribeToSupabaseReadings((newReading) => {
+      const nowTimeStr = new Date().toLocaleTimeString('en-US', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+
+      setEsp32Status(prev => ({
+        ...prev,
+        isConnected: true,
+        isPolling: false,
+        lastChecked: nowTimeStr,
+        lastReading: newReading.totalWeightKg,
+        readingTimestamp: newReading.timestamp,
+        totalCloudReadings: (prev.totalCloudReadings || 0) + 1,
+        errorMessage: null,
+        statusCode: 201,
+      }));
+
+      setReadings(prev => {
+        const exists = prev.some(r => r.id === newReading.id);
+        if (exists) return prev;
+        return [...prev, newReading].sort(
+          (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+        );
+      });
+    }, config.tareWeightKg);
+
+    return () => {
+      if (unsubscribe) {
+        unsubscribe();
+      }
+    };
+  }, [isCloudActive, config.tareWeightKg]);
 
   const forecast = useMemo(() => {
     const currentWeightOverride = (mode === 'esp32' && esp32Status.isConnected && esp32Status.lastReading !== null)
@@ -322,6 +385,11 @@ export function App() {
           forecast={forecast}
           config={config}
           onOpenSettings={() => setIsSettingsModalOpen(true)}
+          readingTimestamp={
+            mode === 'esp32'
+              ? (esp32Status.readingTimestamp || latestReading?.timestamp)
+              : latestReading?.timestamp
+          }
         />
 
         {/* Row 2: Physical Visual Cylinder Gauge & Depletion Forecast Engine */}

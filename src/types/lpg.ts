@@ -28,6 +28,8 @@ export interface ESP32Status {
   isPolling: boolean;
   lastChecked: string | null;
   lastReading: number | null;
+  readingTimestamp?: string | null;
+  totalCloudReadings?: number;
   errorMessage: string | null;
   statusCode?: number;
 }
